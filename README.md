@@ -41,7 +41,6 @@ Traditional multi-color relief tools rely on theoretical "Transmission Distance"
 
 ## 🔄 The Closed-Loop Workflow
 
-**Lumina Studio v1.3** integrates three specialized modules into a unified application:
 
 ### 📐 Module 1: Calibration Generator
 Generates a precision calibration board to physically test filament mixing.
