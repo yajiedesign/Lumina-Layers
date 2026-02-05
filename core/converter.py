@@ -93,7 +93,7 @@ def _save_debug_preview(debug_data, material_matrix, mask_solid, image_path, mod
 def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                          structure_mode, auto_bg, bg_tol, color_mode,
                          add_loop, loop_width, loop_length, loop_hole, loop_pos,
-                         modeling_mode="vector", quantize_colors=32,
+                         modeling_mode: ModelingMode = ModelingMode.HIGH_FIDELITY, quantize_colors=32,
                          blur_kernel=0, smooth_sigma=10):
     """
     Main conversion function: Convert image to 3D model.
@@ -148,7 +148,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     
     # ========== [UPDATED] Native Vector Mode Detection ==========
     # Check if user selected vector mode AND file is SVG
-    if modeling_mode == "vector_native" and image_path.lower().endswith('.svg'):
+    if modeling_mode == ModelingMode.VECTOR and image_path.lower().endswith('.svg'):
         print("[CONVERTER] 🎨 Using Native Vector Engine (Shapely/Clipper)...")
         
         try:
@@ -223,7 +223,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             return None, None, None, error_msg
     
     # If vector mode selected but file is not SVG, show warning
-    if modeling_mode == "vector_native" and not image_path.lower().endswith('.svg'):
+    if modeling_mode == ModelingMode.VECTOR and not image_path.lower().endswith('.svg'):
         return None, None, None, (
             "⚠️ Vector Native mode requires SVG files!\n\n"
             "Your file is not an SVG. Please either:\n"
@@ -264,7 +264,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     print(f"[CONVERTER] Image processed: {target_w}×{target_h}px, scale={pixel_scale}mm/px")
     
     # Step 2: Save Debug Preview (High-Fidelity mode only)
-    if debug_data is not None and mode_info['use_high_fidelity']:
+    if debug_data is not None and mode_info['mode'] == ModelingMode.HIGH_FIDELITY:
         try:
             num_materials = len(slot_names)
             _save_debug_preview(
@@ -272,7 +272,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                 material_matrix=material_matrix,
                 mask_solid=mask_solid,
                 image_path=image_path,
-                mode_name=mode_info['name'],
+                mode_name=mode_info['mode'].get_display_name(),
                 num_materials=num_materials
             )
         except Exception as e:
@@ -423,7 +423,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
     # Step 10: Generate Status Message
     Stats.increment("conversions")
     
-    mode_name = mode_info['name']
+    mode_name = mode_info['mode'].get_display_name()
     msg = f"✅ Conversion complete ({mode_name})! Resolution: {target_w}×{target_h}px"
     
     if loop_added:
@@ -695,6 +695,8 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
         actual_lut_path = lut_path.name
     else:
         return None, None, "❌ Invalid LUT file format"
+
+    modeling_mode = ModelingMode(modeling_mode)
     
     color_conf = ColorSystem.get(color_mode)
     
@@ -899,7 +901,7 @@ def on_remove_loop():
 def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
                         structure_mode, auto_bg, bg_tol, color_mode,
                         add_loop, loop_width, loop_length, loop_hole, loop_pos,
-                        modeling_mode="vector", quantize_colors=64):
+                        modeling_mode: ModelingMode = ModelingMode.HIGH_FIDELITY, quantize_colors=64):
     """
     Wrapper function for generating final model.
     
