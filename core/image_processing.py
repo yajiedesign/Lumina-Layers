@@ -21,7 +21,7 @@ from typing import Dict, Any
 from config import PrinterConfig, ModelingMode
 
 # Import strategies using relative imports to avoid circular dependency
-from .strategies import ProcessorFactory, ImageLoader, LUTManager
+from .image_processing_factory import ProcessorFactory, ImageLoader, LUTManager
 
 
 class LuminaImageProcessor:
