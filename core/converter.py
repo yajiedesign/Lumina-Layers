@@ -37,12 +37,12 @@ def extract_lut_available_colors(lut_path: str) -> List[dict]:
     """
     Extract all available colors from a LUT file.
     
-    This function loads a LUT .npy file and extracts all unique colors
+    This function loads a LUT file (.npy or .npz) and extracts all unique colors
     that the printer can produce. These colors can be used as replacement
     options in the color replacement feature.
     
     Args:
-        lut_path: Path to the LUT .npy file
+        lut_path: Path to the LUT file (.npy or .npz)
     
     Returns:
         List of dicts, each containing:
@@ -55,9 +55,16 @@ def extract_lut_available_colors(lut_path: str) -> List[dict]:
         return []
     
     try:
-        # Load LUT data
-        lut_grid = np.load(lut_path)
-        measured_colors = lut_grid.reshape(-1, 3)
+        # Check if this is a merged LUT (.npz format)
+        if lut_path.endswith('.npz'):
+            lut_data = np.load(lut_path)
+            measured_colors = lut_data['colors']
+            print(f"[LUT_COLORS] Loading merged LUT (.npz) with {len(measured_colors)} colors")
+        else:
+            # Standard .npy format
+            lut_grid = np.load(lut_path)
+            measured_colors = lut_grid.reshape(-1, 3)
+            print(f"[LUT_COLORS] Loading standard LUT (.npy) with {len(measured_colors)} colors")
         
         # Get unique colors
         unique_colors = np.unique(measured_colors, axis=0)
@@ -935,7 +942,12 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
     else:
         return None, None, "❌ Invalid LUT file format"
 
-    modeling_mode = ModelingMode(modeling_mode)
+    # Handle None modeling_mode with default
+    if modeling_mode is None:
+        modeling_mode = ModelingMode.HIGH_FIDELITY
+        print("[CONVERTER] Warning: modeling_mode was None, using default HIGH_FIDELITY")
+    else:
+        modeling_mode = ModelingMode(modeling_mode)
 
     # Clamp quantize_colors to valid range
     quantize_colors = max(8, min(256, quantize_colors))
@@ -1588,30 +1600,68 @@ def detect_lut_color_mode(lut_path):
         lut_path: LUT文件路径
     
     Returns:
-        str: 颜色模式 ("CMYW (Cyan/Magenta/Yellow)", "RYBW (Red/Yellow/Blue)", "6-Color (Smart 1296)", "8-Color Max")
+        str: 颜色模式 ("BW (Black & White)", "CMYW (Cyan/Magenta/Yellow)", "RYBW (Red/Yellow/Blue)", "6-Color (Smart 1296)", "8-Color Max")
     """
     if not lut_path or not os.path.exists(lut_path):
         return None
     
     try:
-        lut_data = np.load(lut_path)
-        total_colors = lut_data.shape[0] * lut_data.shape[1] if lut_data.ndim >= 2 else len(lut_data)
+        # Check if this is a merged LUT (.npz format)
+        if lut_path.endswith('.npz'):
+            print(f"[AUTO_DETECT] Loading merged LUT (.npz)")
+            lut_data = np.load(lut_path)
+            colors = lut_data['colors']
+            total_colors = colors.shape[0]
+            print(f"[AUTO_DETECT] Merged LUT: {total_colors} colors with stacking info")
+        else:
+            # Standard .npy format
+            lut_data = np.load(lut_path)
+            
+            # 确保是2D数组
+            if lut_data.ndim == 1:
+                # 如果是1D数组，假设是 (N*3,) 格式，重塑为 (N, 3)
+                if len(lut_data) % 3 == 0:
+                    lut_data = lut_data.reshape(-1, 3)
+                else:
+                    print(f"[AUTO_DETECT] Invalid LUT format: cannot reshape to (N, 3)")
+                    return None
+            
+            # 计算颜色数量
+            if lut_data.ndim == 2:
+                total_colors = lut_data.shape[0]
+            else:
+                total_colors = lut_data.shape[0] * lut_data.shape[1]
+            
+            print(f"[AUTO_DETECT] LUT shape: {lut_data.shape}, total colors: {total_colors}")
         
-        print(f"[AUTO_DETECT] LUT shape: {lut_data.shape}, total colors: {total_colors}")
+        # 2色模式：32色 (2^5 = 32)
+        if total_colors >= 30 and total_colors <= 35:
+            print(f"[AUTO_DETECT] Detected 2-Color BW mode (32 colors)")
+            return "BW (Black & White)"
         
-        # 8色模式：2738色 (8^5 = 32768, 但实际智能选择2738)
-        if total_colors >= 2600 and total_colors <= 2800:
-            print(f"[AUTO_DETECT] Detected 8-Color mode (2738 colors)")
+        # 融合LUT或超大LUT：>2800色，使用8色模式处理
+        elif total_colors > 2800:
+            print(f"[AUTO_DETECT] Detected Merged/Large LUT ({total_colors} colors) - using 8-Color mode")
             return "8-Color Max"
         
-        # 6色模式：1296色 (6^5 = 7776, 但实际选择1296)
-        elif total_colors >= 1200 and total_colors <= 1400:
-            print(f"[AUTO_DETECT] Detected 6-Color mode (1296 colors)")
+        # 8色模式：2600-2800色
+        elif total_colors >= 2600 and total_colors <= 2800:
+            print(f"[AUTO_DETECT] Detected 8-Color mode ({total_colors} colors)")
+            return "8-Color Max"
+        
+        # 6色融合LUT：1400-2600色
+        elif total_colors >= 1400 and total_colors < 2600:
+            print(f"[AUTO_DETECT] Detected 6-Color Merged LUT ({total_colors} colors)")
             return "6-Color (Smart 1296)"
         
-        # 4色模式：1024色 (4^5 = 1024)
-        elif total_colors >= 900 and total_colors <= 1100:
-            print(f"[AUTO_DETECT] Detected 4-Color mode (1024 colors) - keeping current selection")
+        # 6色模式：1200-1400色
+        elif total_colors >= 1200 and total_colors < 1400:
+            print(f"[AUTO_DETECT] Detected 6-Color mode ({total_colors} colors)")
+            return "6-Color (Smart 1296)"
+        
+        # 4色模式：900-1200色
+        elif total_colors >= 900 and total_colors < 1200:
+            print(f"[AUTO_DETECT] Detected 4-Color mode ({total_colors} colors) - keeping current selection")
             return None  # 不自动切换4色模式，保持用户选择
         
         else:
@@ -1620,6 +1670,8 @@ def detect_lut_color_mode(lut_path):
             
     except Exception as e:
         print(f"[AUTO_DETECT] Error detecting LUT mode: {e}")
+        import traceback
+        traceback.print_exc()
         return None
 
 

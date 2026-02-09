@@ -64,7 +64,14 @@ def draw_corner_points(img, points, color_mode: str):
     color_conf = ColorSystem.get(color_mode)
     labels = color_conf['corner_labels']
 
-    if "8-Color" in color_mode:
+    if "BW" in color_mode or ("Black" in color_mode and "White" in color_mode):
+        draw_colors = [
+            (255, 255, 255),  # White (TL)
+            (0, 0, 0),        # Black (TR)
+            (0, 0, 0),        # Black (BR)
+            (0, 0, 0)         # Black (BL)
+        ]
+    elif "8-Color" in color_mode:
         draw_colors = [
             (255, 255, 255),  # White (TL)
             (255, 255, 0),    # Cyan/Magenta (TR)
@@ -161,7 +168,11 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright, co
         return None, None, None, "❌ 请点击4个角点"
     
     # 动态确定网格大小
-    if "8-Color" in color_mode:
+    if "BW" in color_mode or "Black" in color_mode and "White" in color_mode:
+        grid_size = 6           # Data: 6x6 (32色，只用前32个)
+        physical_grid = 8       # Physical: 8x8 (含边框)
+        total_cells = 32
+    elif "8-Color" in color_mode:
         grid_size = 37          # Data: 37x37 (1369色)
         physical_grid = 39      # Physical: 39x39
         total_cells = 1369
@@ -196,8 +207,19 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright, co
     extracted = np.zeros((grid_size, grid_size, 3), dtype=np.uint8)
     vis = warped.copy()
 
+    # BW模式特殊处理：只提取前32个色块
+    if "BW" in color_mode or ("Black" in color_mode and "White" in color_mode):
+        cells_to_extract = 32
+    else:
+        cells_to_extract = grid_size * grid_size
+
+    extracted_count = 0
     for r in range(grid_size):
         for c in range(grid_size):
+            # BW模式：只提取前32个
+            if extracted_count >= cells_to_extract:
+                break
+            
             # 【关键】计算物理位置时的偏移
             # 无论是 4色 还是 6色，因为都有 1 格边框，所以都需要 +1
             phys_r = r + 1
@@ -223,6 +245,11 @@ def run_extraction(img, points, offset_x, offset_y, zoom, barrel, wb, bright, co
             else:
                 avg = [0, 0, 0]
             extracted[r, c] = avg
+            extracted_count += 1
+        
+        # BW模式：提取够32个就退出外层循环
+        if extracted_count >= cells_to_extract:
+            break
 
     np.save(LUT_FILE_PATH, extracted)
     prev = cv2.resize(extracted, (512, 512), interpolation=cv2.INTER_NEAREST)
@@ -247,10 +274,13 @@ def probe_lut_cell(lut_path, evt: gr.SelectData):
     except Exception:
         return "⚠️ 数据损坏", None, None
 
+    # 动态获取LUT的实际大小
+    lut_height, lut_width = lut.shape[:2]
+    
     x, y = evt.index
-    scale = 512 / DATA_GRID_SIZE
-    c = min(max(int(x / scale), 0), DATA_GRID_SIZE - 1)
-    r = min(max(int(y / scale), 0), DATA_GRID_SIZE - 1)
+    scale = 512 / lut_width  # 使用实际宽度计算缩放比例
+    c = min(max(int(x / scale), 0), lut_width - 1)
+    r = min(max(int(y / scale), 0), lut_height - 1)
 
     rgb = lut[r, c]
     hex_c = '#{:02x}{:02x}{:02x}'.format(*rgb)

@@ -16,7 +16,7 @@ from PIL import Image as PILImage
 
 from core.i18n import I18n
 from config import ColorSystem, ModelingMode
-from utils import Stats, LUTManager
+from utils import Stats, LUTManager, merge_luts, validate_lut_compatibility, get_merge_recommendations
 from core.calibration import generate_calibration_board, generate_smart_board, generate_8color_batch_zip
 from core.extractor import (
     rotate_image,
@@ -661,6 +661,98 @@ def process_batch_generation(batch_files, is_batch, single_image, lut_path, targ
     return None, None, _preview_update(None), "❌ Batch failed: no valid models.\n" + "\n".join(logs)
 
 
+# ========== Advanced Tab Callbacks ==========
+
+def on_primary_lut_upload(file):
+    """Validate and display primary LUT info."""
+    if file is None:
+        return "*未选择文件*"
+    
+    is_valid, color_count, detected_mode = validate_lut_compatibility(file.name)
+    
+    if is_valid:
+        recommendations = get_merge_recommendations(detected_mode)
+        rec_text = ", ".join(recommendations) if recommendations else "无"
+        
+        return (
+            f"✅ **主LUT**: {detected_mode}\n"
+            f"- 颜色数量: {color_count}\n"
+            f"- 建议融合: {rec_text}"
+        )
+    else:
+        return f"❌ 无效的LUT文件: {detected_mode}"
+
+
+def on_secondary_luts_upload(files):
+    """Validate and display secondary LUTs info."""
+    if not files or len(files) == 0:
+        return "*未选择文件*"
+    
+    info_lines = [f"📁 **已选择 {len(files)} 个次要LUT**:\n"]
+    
+    for i, file in enumerate(files, 1):
+        is_valid, color_count, detected_mode = validate_lut_compatibility(file.name)
+        if is_valid:
+            info_lines.append(f"{i}. {detected_mode} ({color_count} 颜色)")
+        else:
+            info_lines.append(f"{i}. ❌ 无效文件")
+    
+    return "\n".join(info_lines)
+
+
+def on_merge_luts_click(primary_file, secondary_files, min_distance):
+    """Perform LUT merge operation."""
+    if primary_file is None:
+        return "❌ 请先上传主LUT文件", gr.update(visible=False)
+    
+    if not secondary_files or len(secondary_files) == 0:
+        return "❌ 请至少上传一个次要LUT文件", gr.update(visible=False)
+    
+    try:
+        # Get file paths
+        primary_path = primary_file.name
+        secondary_paths = [f.name for f in secondary_files]
+        
+        # Perform merge (returns dict with 'colors' and 'stacks')
+        merged_lut_dict, stats = merge_luts(primary_path, secondary_paths, min_distance)
+        
+        # Extract colors and stacks
+        merged_colors = merged_lut_dict['colors']
+        merged_stacks = merged_lut_dict['stacks']
+        
+        # Save merged LUT with stacking information
+        # Use .npz format to save both colors and stacks
+        output_path = os.path.join("output", "merged_lut.npz")
+        os.makedirs("output", exist_ok=True)
+        np.savez_compressed(output_path, colors=merged_colors, stacks=merged_stacks)
+        
+        print(f"[MERGE_LUT] Saved merged LUT with {len(merged_colors)} colors and stacking info")
+        print(f"[MERGE_LUT] Colors shape: {merged_colors.shape}, Stacks shape: {merged_stacks.shape}")
+        
+        # Build status message
+        status_lines = [
+            "✅ **融合成功！**\n",
+            f"- 主LUT颜色: {stats['primary_count']}",
+            f"- 总融合颜色: {stats['total_merged']}",
+            f"- 新增颜色: {stats['total_merged'] - stats['primary_count']}",
+            f"- 去重颜色: {stats['duplicates_removed']}\n",
+            "**各次要LUT贡献**:"
+        ]
+        
+        for path, count in stats['added_from_secondary'].items():
+            filename = os.path.basename(path)
+            status_lines.append(f"  - {filename}: +{count} 颜色")
+        
+        status_message = "\n".join(status_lines)
+        
+        return status_message, gr.update(value=output_path, visible=True)
+        
+    except Exception as e:
+        import traceback
+        traceback.print_exc()
+        return f"❌ 融合失败: {str(e)}", gr.update(visible=False)
+
+
 def create_app():
     """Build the Gradio app (tabs, i18n, events) and return the Blocks instance."""
     with gr.Blocks(title="Lumina Studio", css=HEADER_CSS + LUT_GRID_CSS) as app:
@@ -712,7 +804,12 @@ def create_app():
                 components.update(ext_components)
             tab_components['tab_extractor'] = tab_ext
             
-            with gr.TabItem(label=I18n.get('tab_about', "zh"), id=3) as tab_about:
+            with gr.TabItem(label="🔬 高级 | Advanced", id=3) as tab_advanced:
+                advanced_components = create_advanced_tab_content("zh")
+                components.update(advanced_components)
+            tab_components['tab_advanced'] = tab_advanced
+            
+            with gr.TabItem(label=I18n.get('tab_about', "zh"), id=4) as tab_about:
                 about_components = create_about_tab_content("zh")
                 components.update(about_components)
             tab_components['tab_about'] = tab_about
@@ -735,6 +832,7 @@ def create_app():
             updates.append(gr.update(label=I18n.get('tab_converter', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_calibration', new_lang)))
             updates.append(gr.update(label=I18n.get('tab_extractor', new_lang)))
+            updates.append(gr.update(label="🔬 高级 | Advanced" if new_lang == "zh" else "🔬 Advanced"))
             updates.append(gr.update(label=I18n.get('tab_about', new_lang)))
             updates.extend(_get_all_component_updates(new_lang, components))
             updates.append(gr.update(value=_get_footer_html(new_lang)))
@@ -749,6 +847,7 @@ def create_app():
             tab_components['tab_converter'],
             tab_components['tab_calibration'],
             tab_components['tab_extractor'],
+            tab_components['tab_advanced'],
             tab_components['tab_about'],
         ]
         output_list.extend(_get_component_list(components))
@@ -817,6 +916,33 @@ def create_app():
             )
             return status_msg, _get_stats_html(lang, new_stats)
 
+        # ========== Advanced Tab Events ==========
+        components['file_primary_lut'].change(
+            fn=on_primary_lut_upload,
+            inputs=[components['file_primary_lut']],
+            outputs=[components['md_primary_info']]
+        )
+
+        components['file_secondary_luts'].change(
+            fn=on_secondary_luts_upload,
+            inputs=[components['file_secondary_luts']],
+            outputs=[components['md_secondary_info']]
+        )
+
+        components['btn_merge_luts'].click(
+            fn=on_merge_luts_click,
+            inputs=[
+                components['file_primary_lut'],
+                components['file_secondary_luts'],
+                components['slider_min_distance']
+            ],
+            outputs=[
+                components['md_merge_status'],
+                components['file_merged_lut']
+            ]
+        )
+
+        # ========== About Tab Events ==========
         components['btn_clear_cache'].click(
             fn=on_clear_cache,
             inputs=[lang_state],
@@ -940,7 +1066,9 @@ def _get_all_component_updates(lang: str, components: dict) -> list:
                     choices=[
                         (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                         (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
-                        ("6-Color (Smart 1296)", "6-Color (Smart 1296)")
+                        ("BW (Black & White)", "BW (Black & White)"),
+                        ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
+                        ("8-Color Max", "8-Color Max")
                     ]
                 ))
             elif choice_key == 'conv_structure':
@@ -1121,7 +1249,7 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
             with gr.Row():
                 components['dropdown_conv_lut_dropdown'] = gr.Dropdown(
                     choices=current_choices,
-                    label="校准数据 (.npy) / Calibration Data",
+                    label="校准数据 (.npy/.npz) / Calibration Data",
                     value=default_lut_value,
                     interactive=True,
                     scale=2
@@ -1129,7 +1257,7 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 conv_lut_upload = gr.File(
                     label="",
                     show_label=False,
-                    file_types=['.npy'],
+                    file_types=['.npy', '.npz'],
                     height=84,
                     min_width=100,
                     scale=1,
@@ -1225,6 +1353,7 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                     choices=[
                         (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                         (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
+                        ("BW (Black & White)", "BW (Black & White)"),
                         ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                         ("8-Color Max", "8-Color Max")
                     ],
@@ -1963,6 +2092,7 @@ def create_calibration_tab_content(lang: str) -> dict:
                 choices=[
                     (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                     (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
+                    ("BW (Black & White)", "BW (Black & White)"),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                     ("8-Color Max", "8-Color Max")
                 ],
@@ -2017,6 +2147,10 @@ def create_calibration_tab_content(lang: str) -> dict:
         if "6-Color" in color_mode:
             # Call Smart 1296 generator
             return generate_smart_board(block_size, gap)
+        if "BW" in color_mode or "Black" in color_mode and "White" in color_mode:
+            # Call BW generator
+            from core.calibration import generate_bw_calibration_board
+            return generate_bw_calibration_board(block_size, gap, backing)
         else:
             # Call traditional 4-color generator
             return generate_calibration_board(color_mode, block_size, gap, backing)
@@ -2060,6 +2194,7 @@ def create_extractor_tab_content(lang: str) -> dict:
                 choices=[
                     (I18n.get('conv_color_mode_cmyw', lang), I18n.get('conv_color_mode_cmyw', 'en')),
                     (I18n.get('conv_color_mode_rybw', lang), I18n.get('conv_color_mode_rybw', 'en')),
+                    ("BW (Black & White)", "BW (Black & White)"),
                     ("6-Color (Smart 1296)", "6-Color (Smart 1296)"),
                     ("8-Color Max", "8-Color Max")
                 ],
@@ -2266,6 +2401,70 @@ def create_extractor_tab_content(lang: str) -> dict:
     
     return components
 
+
+
+def create_advanced_tab_content(lang: str) -> dict:
+    """Build Advanced tab content for LUT merging. Returns component dict."""
+    components = {}
+    
+    # Title and description
+    components['md_advanced_title'] = gr.Markdown("### 🔬 高级功能 | Advanced Features" if lang == 'zh' else "### 🔬 Advanced Features")
+    components['md_lut_merge_desc'] = gr.Markdown(
+        "**LUT融合工具** - 合并多个LUT文件以扩展色域范围\n\n"
+        "例如：8色LUT可以融合6色、4色和黑白LUT，获得更丰富的颜色选择。"
+        if lang == 'zh' else
+        "**LUT Merger** - Merge multiple LUT files to expand color gamut\n\n"
+        "Example: 8-color LUT can merge with 6-color, 4-color, and BW LUTs for richer color options."
+    )
+    
+    # Primary LUT upload
+    components['md_primary_lut'] = gr.Markdown("#### 1️⃣ 主LUT文件 | Primary LUT" if lang == 'zh' else "#### 1️⃣ Primary LUT")
+    components['file_primary_lut'] = gr.File(
+        label="上传主LUT (.npy/.npz)" if lang == 'zh' else "Upload Primary LUT (.npy/.npz)",
+        file_types=[".npy", ".npz"]
+    )
+    components['md_primary_info'] = gr.Markdown("*未选择文件*" if lang == 'zh' else "*No file selected*")
+    
+    # Secondary LUTs upload
+    components['md_secondary_luts'] = gr.Markdown("#### 2️⃣ 次要LUT文件 | Secondary LUTs" if lang == 'zh' else "#### 2️⃣ Secondary LUTs")
+    components['md_secondary_hint'] = gr.Markdown(
+        "💡 **提示**: 可以上传多个次要LUT文件进行融合" if lang == 'zh' else 
+        "💡 **Hint**: You can upload multiple secondary LUT files to merge"
+    )
+    components['file_secondary_luts'] = gr.File(
+        label="上传次要LUT (.npy/.npz)" if lang == 'zh' else "Upload Secondary LUTs (.npy/.npz)",
+        file_types=[".npy", ".npz"],
+        file_count="multiple"
+    )
+    components['md_secondary_info'] = gr.Markdown("*未选择文件*" if lang == 'zh' else "*No file selected*")
+    
+    # Merge settings
+    components['md_merge_settings'] = gr.Markdown("#### ⚙️ 融合设置 | Merge Settings" if lang == 'zh' else "#### ⚙️ Merge Settings")
+    components['slider_min_distance'] = gr.Slider(
+        minimum=0.0,
+        maximum=20.0,
+        value=0.0,
+        step=0.5,
+        label="最小RGB距离 | Minimum RGB Distance" if lang == 'zh' else "Minimum RGB Distance",
+        info="颜色之间的最小距离，0=允许重叠，越大去重越激进" if lang == 'zh' else "Minimum distance between colors, 0=allow overlap, higher = more aggressive deduplication"
+    )
+    
+    # Merge button
+    components['btn_merge_luts'] = gr.Button(
+        "🔀 开始融合 | Start Merge" if lang == 'zh' else "🔀 Start Merge",
+        variant="primary",
+        size="lg"
+    )
+    
+    # Results
+    components['md_merge_results'] = gr.Markdown("#### 📊 融合结果 | Merge Results" if lang == 'zh' else "#### 📊 Merge Results")
+    components['md_merge_status'] = gr.Markdown("")
+    components['file_merged_lut'] = gr.File(
+        label="下载融合后的LUT | Download Merged LUT" if lang == 'zh' else "Download Merged LUT",
+        visible=False
+    )
+    
+    return components
 
 
 def create_about_tab_content(lang: str) -> dict:

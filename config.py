@@ -109,8 +109,26 @@ class ColorSystem:
         'corner_labels': ['TL', 'TR', 'BR', 'BL']
     }
 
+    BW = {
+        'name': 'BW',
+        'base': 2,
+        'layer_count': 5,
+        'slots': ["White", "Black"],
+        'preview': {
+            0: [255, 255, 255, 255],  # White
+            1: [20, 20, 20, 255]      # Black
+        },
+        'map': {"White": 0, "Black": 1},
+        'corner_labels': ["白色 (左上)", "黑色 (右上)", "黑色 (右下)", "黑色 (左下)"],
+        'corner_labels_en': ["White (TL)", "Black (TR)", "Black (BR)", "Black (BL)"]
+    }
+
     @staticmethod
     def get(mode: str):
+        if mode is None:
+            return ColorSystem.RYBW  # Default fallback
+        if "BW" in mode or ("Black" in mode and "White" in mode):
+            return ColorSystem.BW
         if "8-Color" in mode:
             return ColorSystem.EIGHT_COLOR
         if "6-Color" in mode:

@@ -152,15 +152,52 @@ class LuminaImageProcessor:
     
     def _load_lut(self, lut_path):
         """
-        Load and validate LUT file (Supports 4-Color, 6-Color, and 8-Color).
+        Load and validate LUT file (Supports 2-Color, 4-Color, 6-Color, 8-Color, and Merged LUTs).
         
         Automatically detects LUT type based on size:
+        - 32 colors: 2-Color BW (Black & White)
         - 1024 colors: 4-Color Standard (CMYW/RYBW)
         - 1296 colors: 6-Color Smart 1296
         - 2738 colors: 8-Color Max
+        - >2800 colors: Merged LUT (treated as 8-Color)
+        
+        Supports both .npy (colors only) and .npz (colors + stacks) formats.
         """
         try:
+            # Check if this is a merged LUT with stacking info (.npz format)
+            if lut_path.endswith('.npz'):
+                print("[IMAGE_PROCESSOR] Loading merged LUT with stacking info (.npz)")
+                lut_data = np.load(lut_path)
+                
+                # Extract colors and stacks
+                measured_colors = lut_data['colors']
+                loaded_stacks = lut_data['stacks']
+                
+                total_colors = measured_colors.shape[0]
+                
+                print(f"[IMAGE_PROCESSOR] Loaded merged LUT: {total_colors} colors with stacking info")
+                print(f"[IMAGE_PROCESSOR] Colors shape: {measured_colors.shape}, Stacks shape: {loaded_stacks.shape}")
+                
+                # Use loaded stacking info directly
+                self.lut_rgb = measured_colors
+                self.ref_stacks = loaded_stacks
+                
+                # Build KD-Tree
+                self.kdtree = KDTree(self.lut_rgb)
+                
+                print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (Merged LUT with preserved stacking)")
+                return
+            
+            # Standard .npy format
             lut_grid = np.load(lut_path)
+            
+            # 确保是2D数组 (N, 3)
+            if lut_grid.ndim == 1:
+                if len(lut_grid) % 3 == 0:
+                    lut_grid = lut_grid.reshape(-1, 3)
+                else:
+                    raise ValueError(f"Invalid LUT shape: {lut_grid.shape}")
+            
             measured_colors = lut_grid.reshape(-1, 3)
             total_colors = measured_colors.shape[0]
         except Exception as e:
@@ -171,59 +208,153 @@ class LuminaImageProcessor:
         
         print(f"[IMAGE_PROCESSOR] Loading LUT with {total_colors} points...")
         
-        # Branch 1: 8-Color Max (2738)
-        if "8-Color" in self.color_mode or total_colors == 2738:
-            print("[IMAGE_PROCESSOR] Detected 8-Color Max mode")
+        # Branch 0: 2-Color BW (32)
+        if "BW" in self.color_mode or total_colors == 32:
+            print("[IMAGE_PROCESSOR] Detected 2-Color BW mode")
             
-            # Load pre-generated 8-color stacks
-            smart_stacks = np.load('assets/smart_8color_stacks.npy').tolist()
+            # Generate all 32 combinations (2^5 = 32)
+            for i in range(32):
+                if i >= total_colors:
+                    break
+                
+                # Rebuild 2-base stacking (0..31)
+                digits = []
+                temp = i
+                for _ in range(5):
+                    digits.append(temp % 2)
+                    temp //= 2
+                stack = digits[::-1]  # [顶...底] format
+                
+                valid_rgb.append(measured_colors[i])
+                valid_stacks.append(stack)
             
-            # Reverse stacking order for Face-Down printing
-            # Original smart_stacks is [Bottom, ..., Top] (simulation data order)
-            # Converter expects [Top, ..., Bottom] so Z=0 is the viewing surface
-            smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
-            print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
+            self.lut_rgb = np.array(valid_rgb)
+            self.ref_stacks = np.array(valid_stacks)
             
-            if len(smart_stacks) != total_colors:
-                print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
-                min_len = min(len(smart_stacks), total_colors)
-                smart_stacks = smart_stacks[:min_len]
-                measured_colors = measured_colors[:min_len]
-            
-            self.lut_rgb = measured_colors
-            self.ref_stacks = np.array(smart_stacks)
-            
-            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (8-Color mode)")
+            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (2-Color BW mode)")
         
-        # Branch 2: 6-Color Smart 1296
-        elif "6-Color" in self.color_mode or total_colors == 1296:
-            print("[IMAGE_PROCESSOR] Detected 6-Color Smart 1296 mode")
+        # Branch 1: 8-Color Max or Merged LUT (>2600)
+        elif "8-Color" in self.color_mode or total_colors >= 2600:
+            print(f"[IMAGE_PROCESSOR] Detected 8-Color/Merged LUT mode ({total_colors} colors)")
             
-            from core.calibration import get_top_1296_colors
+            # 对于融合LUT，我们需要智能生成堆叠信息
+            if total_colors > 2800:
+                print("[IMAGE_PROCESSOR] Merged LUT detected - generating intelligent stacking info")
+                self.lut_rgb = measured_colors
+                
+                # 获取8色材料的基础颜色（用于颜色分析）
+                base_colors = np.array([
+                    [255, 255, 255],  # 0: White
+                    [0, 134, 214],    # 1: Cyan
+                    [236, 0, 140],    # 2: Magenta
+                    [244, 238, 42],   # 3: Yellow
+                    [20, 20, 20],     # 4: Black
+                    [193, 46, 31],    # 5: Red
+                    [10, 41, 137],    # 6: Deep Blue
+                    [0, 174, 66]      # 7: Green
+                ], dtype=float)
+                
+                # 为每个颜色智能推断最可能的堆叠
+                intelligent_stacks = []
+                for color in measured_colors:
+                    # 计算与所有基础材料的距离
+                    distances = np.linalg.norm(base_colors - color.astype(float), axis=1)
+                    
+                    # 找到最接近的材料
+                    closest_mat = np.argmin(distances)
+                    
+                    # 策略：使用最接近的材料填充所有5层
+                    # 这样可以确保颜色尽可能接近目标，且充分利用所有8种材料
+                    stack = [int(closest_mat)] * 5
+                    intelligent_stacks.append(stack)
+                
+                self.ref_stacks = np.array(intelligent_stacks, dtype=int)
+                
+                # 统计材料使用情况
+                unique_mats, counts = np.unique(self.ref_stacks, return_counts=True)
+                print(f"[IMAGE_PROCESSOR] Material distribution in merged LUT:")
+                for mat_id, count in zip(unique_mats, counts):
+                    percentage = count / (total_colors * 5) * 100
+                    print(f"  Material {mat_id}: {count} layers ({percentage:.1f}%)")
+                
+                print(f"[IMAGE_PROCESSOR] Generated {len(intelligent_stacks)} intelligent stacks for merged LUT")
+            else:
+                # 标准8色LUT：加载预生成的堆叠数据
+                smart_stacks = np.load('assets/smart_8color_stacks.npy').tolist()
+                
+                # Reverse stacking order for Face-Down printing
+                smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
+                print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
+                
+                if len(smart_stacks) != total_colors:
+                    print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
+                    min_len = min(len(smart_stacks), total_colors)
+                    smart_stacks = smart_stacks[:min_len]
+                    measured_colors = measured_colors[:min_len]
+                
+                self.lut_rgb = measured_colors
+                self.ref_stacks = np.array(smart_stacks)
             
-            # Retrieve 1296 intelligent stacking order (must match calibration.py logic)
-            # Note: generate_smart_board uses padding to fill 38x38,
-            # but extractor extracts the border-removed 36x36 (1296 cells).
-            # So we directly get the original stacking data here.
+            print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (8-Color/Merged mode)")
+        
+        # Branch 2: 6-Color Smart 1296 or Merged 6-Color LUT
+        elif "6-Color" in self.color_mode or (total_colors >= 1200 and total_colors < 2600):
+            print(f"[IMAGE_PROCESSOR] Detected 6-Color mode ({total_colors} colors)")
             
-            smart_stacks = get_top_1296_colors()
-            
-            # Reverse stacking order to make it (Top -> Bottom)
-            # Original smart_stacks is [Bottom, ..., Top] (simulation data order)
-            # But Converter's Face Down logic prints Z=0 as Index=0
-            # So we need to reverse to [Top, ..., Bottom], making Z=0 the viewing surface
-            smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
-            print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
-            
-            if len(smart_stacks) != total_colors:
-                print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
-                min_len = min(len(smart_stacks), total_colors)
-                smart_stacks = smart_stacks[:min_len]
-                measured_colors = measured_colors[:min_len]
-            
-            # No "Base Blue" filtering in 6-color mode (colors too complex)
-            self.lut_rgb = measured_colors
-            self.ref_stacks = np.array(smart_stacks)
+            # 对于融合6色LUT（>1400色），智能生成堆叠信息
+            if total_colors > 1400:
+                print("[IMAGE_PROCESSOR] Merged 6-Color LUT detected - generating intelligent stacking info")
+                self.lut_rgb = measured_colors
+                
+                # 获取6色材料的基础颜色
+                base_colors = np.array([
+                    [255, 255, 255],  # 0: White
+                    [0, 134, 214],    # 1: Cyan
+                    [236, 0, 140],    # 2: Magenta
+                    [0, 174, 66],     # 3: Green
+                    [244, 238, 42],   # 4: Yellow
+                    [20, 20, 20]      # 5: Black
+                ], dtype=float)
+                
+                # 为每个颜色智能推断最可能的堆叠
+                intelligent_stacks = []
+                for color in measured_colors:
+                    # 计算与所有基础材料的距离
+                    distances = np.linalg.norm(base_colors - color.astype(float), axis=1)
+                    
+                    # 找到最接近的材料
+                    closest_mat = np.argmin(distances)
+                    
+                    # 使用最接近的材料填充所有5层
+                    stack = [int(closest_mat)] * 5
+                    intelligent_stacks.append(stack)
+                
+                self.ref_stacks = np.array(intelligent_stacks, dtype=int)
+                
+                # 统计材料使用情况
+                unique_mats, counts = np.unique(self.ref_stacks, return_counts=True)
+                print(f"[IMAGE_PROCESSOR] Material distribution in merged 6-Color LUT:")
+                for mat_id, count in zip(unique_mats, counts):
+                    percentage = count / (total_colors * 5) * 100
+                    print(f"  Material {mat_id}: {count} layers ({percentage:.1f}%)")
+                
+                print(f"[IMAGE_PROCESSOR] Generated {len(intelligent_stacks)} intelligent stacks")
+            else:
+                # 标准6色LUT：加载智能选择的堆叠数据
+                from core.calibration import get_top_1296_colors
+                
+                smart_stacks = get_top_1296_colors()
+                smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
+                print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
+                
+                if len(smart_stacks) != total_colors:
+                    print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
+                    min_len = min(len(smart_stacks), total_colors)
+                    smart_stacks = smart_stacks[:min_len]
+                    measured_colors = measured_colors[:min_len]
+                
+                self.lut_rgb = measured_colors
+                self.ref_stacks = np.array(smart_stacks)
             
             print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (6-Color mode)")
         
