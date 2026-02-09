@@ -15,7 +15,7 @@ import numpy as np
 from PIL import Image as PILImage
 
 from core.i18n import I18n
-from config import ColorSystem, ModelingMode
+from config import ColorSystem, ModelingMode,ColorSpace
 from utils import Stats, LUTManager
 from core.calibration import generate_calibration_board, generate_smart_board, generate_8color_batch_zip
 from core.extractor import (
@@ -604,16 +604,17 @@ def _preview_update(img):
 def process_batch_generation(batch_files, is_batch, single_image, lut_path, target_width_mm,
                              spacer_thick, structure_mode, auto_bg, bg_tol, color_mode,
                              add_loop, loop_width, loop_length, loop_hole, loop_pos,
-                             modeling_mode, quantize_colors, color_replacements=None, progress=gr.Progress()):
+                             modeling_mode, quantize_colors,color_space, color_replacements=None, progress=gr.Progress()):
     """Dispatch to single-image or batch generation; batch writes a ZIP of 3MFs.
 
     Returns:
         tuple: (file_or_zip_path, model3d_value, preview_image, status_text).
     """
     modeling_mode = ModelingMode(modeling_mode)
+    color_space = ColorSpace(color_space)
     args = (lut_path, target_width_mm, spacer_thick, structure_mode, auto_bg, bg_tol,
             color_mode, add_loop, loop_width, loop_length, loop_hole, loop_pos,
-            modeling_mode, quantize_colors, color_replacements)
+            modeling_mode, quantize_colors,color_space, color_replacements)
 
     if not is_batch:
         out_path, glb_path, preview_img, status = generate_final_model(single_image, *args)
@@ -1317,6 +1318,15 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                         label=I18n.get('conv_tolerance', lang),
                         info=I18n.get('conv_tolerance_info', lang)
                     )
+                with gr.Row():
+                    components["radio_conv_color_space"] = gr.Radio(
+                        choices=[
+                            (I18n.get("conv_color_space_rgb", lang), ColorSpace.RGB),
+                            (I18n.get("conv_color_space_hsv", lang), ColorSpace.HSV),
+                        ],
+                        value=ColorSpace.RGB,
+                        label=I18n.get("conv_color_space", lang)
+                    )
             gr.Markdown("---")
             with gr.Row(elem_classes=["action-buttons"]):
                 components['btn_conv_preview_btn'] = gr.Button(
@@ -1762,11 +1772,11 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
     )
     def generate_preview_cached_with_fit(image_path, lut_path, target_width_mm,
                                          auto_bg, bg_tol, color_mode,
-                                         modeling_mode, quantize_colors):
+                                         modeling_mode, quantize_colors,color_space):
         display, cache, status = generate_preview_cached(
             image_path, lut_path, target_width_mm,
             auto_bg, bg_tol, color_mode,
-            modeling_mode, quantize_colors
+            modeling_mode, quantize_colors,color_space
         )
         return _preview_update(display), cache, status
 
@@ -1780,7 +1790,8 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 components['slider_conv_tolerance'],
                 components['radio_conv_color_mode'],
                 components['radio_conv_modeling_mode'],
-                components['slider_conv_quantize_colors']
+                components['slider_conv_quantize_colors'],
+                components['radio_conv_color_space'],
             ],
             outputs=[conv_preview, conv_preview_cache, components['textbox_conv_status']]
     ).then(
@@ -1965,6 +1976,7 @@ def create_converter_tab_content(lang: str, lang_state=None) -> dict:
                 conv_loop_pos,
                 components['radio_conv_modeling_mode'],
                 components['slider_conv_quantize_colors'],
+                components['radio_conv_color_space'],
                 conv_replacement_map
             ],
             outputs=[

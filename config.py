@@ -48,6 +48,12 @@ class ModelingMode(str, Enum):
         }
         return display_names.get(self, self.value)
 
+class ColorSpace(str, Enum):
+    """Color space mode for image processing."""
+
+    RGB = "rgb"  # RGB color space
+    HSV = "hsv"  # HSV color space
+
 
 class ColorSystem:
     """Color model definitions for CMYW, RYBW, and 6-Color systems."""

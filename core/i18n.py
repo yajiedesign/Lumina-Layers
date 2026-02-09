@@ -669,7 +669,20 @@ class I18n:
             'zh': '☀️ 日间模式',
             'en': '☀️ Day Mode'
         },
-        
+        'conv_color_space': {
+            'zh': '🎨 颜色空间',
+            'en': '🎨 Color Space'
+        },
+
+        'conv_color_space_rgb': {
+            'zh': 'RGB (红绿蓝)',
+            'en': 'RGB (Red Green Blue)'
+        },
+        'conv_color_space_hsv': {
+            'zh': 'HSV (色相饱和度)',
+            'en': 'HSV (Hue Saturation Value)'
+        },
+
         # ==================== About Page Content ====================
         'about_content': {
             'zh': """## 🌟 Lumina Studio v1.5.7

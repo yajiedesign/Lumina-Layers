@@ -9,7 +9,7 @@ import cv2
 from PIL import Image
 from scipy.spatial import KDTree
 
-from config import PrinterConfig, ModelingMode
+from config import PrinterConfig, ModelingMode, ColorSpace
 
 # SVG support (optional dependency)
 try:
@@ -19,6 +19,49 @@ try:
 except ImportError:
     HAS_SVG = False
     print("⚠️ [SVG] svglib/reportlab not installed. SVG support disabled.")
+
+
+def _hsv_to_cylindrical(hsv_array: np.ndarray) -> np.ndarray:
+    """
+    Convert HSV colors to cylindrical projection coordinates.
+
+    This transformation properly handles the circular nature of the Hue channel
+    by converting polar coordinates (H, S) to Cartesian coordinates (x, y).
+
+    Args:
+        hsv_array: (N, 3) array with [H, S, V] values
+                   H: 0-180 (OpenCV range)
+                   S: 0-255
+                   V: 0-255
+
+    Returns:
+        (N, 3) array with [x, y, z] cylindrical coordinates where:
+            x = S * cos(H * 2π / 180 * 2)
+            y = S * sin(H * 2π / 180 * 2)
+            z = V
+
+    The cylindrical projection maps the HSV color cylinder to Cartesian 3D space,
+    solving the problem where Hue=0 and Hue=180 (red) are actually the same color
+    but have a large Euclidean distance in HSV space.
+    """
+    # Extract H, S, V channels
+    H = hsv_array[:, 0].astype(np.float32)
+    S = hsv_array[:, 1].astype(np.float32)
+    V = hsv_array[:, 2].astype(np.float32)
+
+    # Convert H from OpenCV degrees (0-180) to radians
+    # OpenCV uses 0-180 for H (instead of 0-360), so multiply by 2 to get full circle
+    theta = np.radians(H * 2)
+
+    # Convert to cylindrical coordinates
+    x = S * np.cos(theta)
+    y = S * np.sin(theta)
+    z = V
+
+    # Stack into (N, 3) array
+    cylindrical = np.stack([x, y, z], axis=1)
+
+    return cylindrical
 
 
 class LuminaImageProcessor:
@@ -152,16 +195,52 @@ class LuminaImageProcessor:
     
     def _load_lut(self, lut_path):
         """
-        Load and validate LUT file (Supports 2-Color, 4-Color, 6-Color, and 8-Color).
+        Load and validate LUT file (Supports 2-Color, 4-Color, 6-Color, 8-Color, and Merged LUTs).
         
         Automatically detects LUT type based on size:
         - 32 colors: 2-Color BW (Black & White)
         - 1024 colors: 4-Color Standard (CMYW/RYBW)
         - 1296 colors: 6-Color Smart 1296
         - 2738 colors: 8-Color Max
+        - >2800 colors: Merged LUT (treated as 8-Color)
+        
+        Supports both .npy (colors only) and .npz (colors + stacks) formats.
         """
         try:
+            # Check if this is a merged LUT with stacking info (.npz format)
+            if lut_path.endswith('.npz'):
+                print("[IMAGE_PROCESSOR] Loading merged LUT with stacking info (.npz)")
+                lut_data = np.load(lut_path)
+                
+                # Extract colors and stacks
+                measured_colors = lut_data['colors']
+                loaded_stacks = lut_data['stacks']
+                
+                total_colors = measured_colors.shape[0]
+                
+                print(f"[IMAGE_PROCESSOR] Loaded merged LUT: {total_colors} colors with stacking info")
+                print(f"[IMAGE_PROCESSOR] Colors shape: {measured_colors.shape}, Stacks shape: {loaded_stacks.shape}")
+                
+                # Use loaded stacking info directly
+                self.lut_rgb = measured_colors
+                self.ref_stacks = loaded_stacks
+                
+                # Build KD-Tree
+                self.kdtree = KDTree(self.lut_rgb)
+                
+                print(f"✅ LUT loaded: {len(self.lut_rgb)} colors (Merged LUT with preserved stacking)")
+                return
+            
+            # Standard .npy format
             lut_grid = np.load(lut_path)
+            
+            # 确保是2D数组 (N, 3)
+            if lut_grid.ndim == 1:
+                if len(lut_grid) % 3 == 0:
+                    lut_grid = lut_grid.reshape(-1, 3)
+                else:
+                    raise ValueError(f"Invalid LUT shape: {lut_grid.shape}")
+            
             measured_colors = lut_grid.reshape(-1, 3)
             total_colors = measured_colors.shape[0]
         except Exception as e:
@@ -203,17 +282,17 @@ class LuminaImageProcessor:
             
             # Load pre-generated 8-color stacks
             smart_stacks = np.load('assets/smart_8color_stacks.npy').tolist()
-            
+
             # Reverse stacking order for Face-Down printing
             smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
             print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
-            
+
             if len(smart_stacks) != total_colors:
                 print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
                 min_len = min(len(smart_stacks), total_colors)
                 smart_stacks = smart_stacks[:min_len]
                 measured_colors = measured_colors[:min_len]
-            
+
             self.lut_rgb = measured_colors
             self.ref_stacks = np.array(smart_stacks)
             
@@ -224,17 +303,17 @@ class LuminaImageProcessor:
             print("[IMAGE_PROCESSOR] Detected 6-Color Smart 1296 mode")
             
             from core.calibration import get_top_1296_colors
-            
+
             smart_stacks = get_top_1296_colors()
             smart_stacks = [tuple(reversed(s)) for s in smart_stacks]
             print("[IMAGE_PROCESSOR] Stacks reversed for Face-Down printing compatibility.")
-            
+
             if len(smart_stacks) != total_colors:
                 print(f"⚠️ Warning: Stacks count ({len(smart_stacks)}) != LUT count ({total_colors})")
                 min_len = min(len(smart_stacks), total_colors)
                 smart_stacks = smart_stacks[:min_len]
                 measured_colors = measured_colors[:min_len]
-            
+
             self.lut_rgb = measured_colors
             self.ref_stacks = np.array(smart_stacks)
             
@@ -280,7 +359,7 @@ class LuminaImageProcessor:
         self.kdtree = KDTree(self.lut_rgb)
     
     def process_image(self, image_path, target_width_mm, modeling_mode,
-                     quantize_colors, auto_bg, bg_tol,
+                     quantize_colors, auto_bg, bg_tol,color_space,
                      blur_kernel=0, smooth_sigma=10):
         """
         Main image processing method
@@ -292,6 +371,7 @@ class LuminaImageProcessor:
             quantize_colors: K-Means quantization color count
             auto_bg: Whether to auto-remove background
             bg_tol: Background tolerance
+            color_space: RGB or HSV
             blur_kernel: Median filter kernel size (0=disabled, recommended 0-5)
             smooth_sigma: Bilateral filter sigma value (recommended 5-20)
         
@@ -395,12 +475,20 @@ class LuminaImageProcessor:
         # Color processing and matching
         debug_data = None
         if modeling_mode == ModelingMode.HIGH_FIDELITY:
-            matched_rgb, material_matrix, bg_reference, debug_data = self._process_high_fidelity_mode(
-                rgb_arr, target_h, target_w, quantize_colors, blur_kernel, smooth_sigma
+            matched_rgb, material_matrix, bg_reference, debug_data = (
+                self._process_high_fidelity_mode(
+                    rgb_arr,
+                    target_h,
+                    target_w,
+                    quantize_colors,
+                    color_space,
+                    blur_kernel,
+                    smooth_sigma,
+                )
             )
         else:
             matched_rgb, material_matrix, bg_reference = self._process_pixel_mode(
-                rgb_arr, target_h, target_w
+                rgb_arr, target_h, target_w, color_space
             )
         
         # Background removal - combine alpha transparency with optional auto-bg
@@ -432,7 +520,7 @@ class LuminaImageProcessor:
         return result
 
     
-    def _process_high_fidelity_mode(self, rgb_arr, target_h, target_w, quantize_colors,
+    def _process_high_fidelity_mode(self, rgb_arr, target_h, target_w, quantize_colors,color_space,
                                     blur_kernel, smooth_sigma):
         """
         High-fidelity mode image processing
@@ -457,20 +545,34 @@ class LuminaImageProcessor:
         total_start = time.time()
         
         print(f"[IMAGE_PROCESSOR] Starting edge-preserving processing...")
-        
-        # Step 1: Bilateral filter (edge-preserving smoothing)
+        print(f"[IMAGE_PROCESSOR] Color space mode: {color_space.value.upper()}")
+
+        # Step 1: Color space conversion (if HSV)
+        if color_space == ColorSpace.HSV:
+            print(f"[IMAGE_PROCESSOR] Converting RGB to HSV for K-Means...")
+            hsv_arr = cv2.cvtColor(rgb_arr.astype(np.uint8), cv2.COLOR_RGB2HSV).astype(
+                np.float32
+            )
+            # Normalize H channel: 0-180 → 0-255
+            hsv_arr[:, :, 0] = hsv_arr[:, :, 0] * 255 / 180
+            processing_arr = hsv_arr.astype(np.uint8)
+            print(f"[IMAGE_PROCESSOR] HSV conversion complete (H normalized)")
+        else:
+            processing_arr = rgb_arr
+
+        # Step 2: Bilateral filter (edge-preserving smoothing)
         t0 = time.time()
         if smooth_sigma > 0:
             print(f"[IMAGE_PROCESSOR] Applying bilateral filter (sigma={smooth_sigma})...")
             rgb_processed = cv2.bilateralFilter(
-                rgb_arr.astype(np.uint8), 
+                processing_arr.astype(np.uint8),
                 d=9,
                 sigmaColor=smooth_sigma, 
                 sigmaSpace=smooth_sigma
             )
         else:
             print(f"[IMAGE_PROCESSOR] Bilateral filter disabled (sigma=0)")
-            rgb_processed = rgb_arr.astype(np.uint8)
+            rgb_processed = processing_arr.astype(np.uint8)
         print(f"[IMAGE_PROCESSOR] ⏱️ Bilateral filter: {time.time() - t0:.2f}s")
         
         # Step 2: Optional median filter (remove salt-and-pepper noise)
@@ -495,7 +597,9 @@ class LuminaImageProcessor:
         # 方案 3：预缩放优化
         # 如果像素数超过 50 万，先缩小做 K-Means，再映射回原图
         KMEANS_PIXEL_THRESHOLD = 500_000
-        
+
+        from scipy.spatial import KDTree
+
         t0 = time.time()
         if total_pixels > KMEANS_PIXEL_THRESHOLD:
             # 计算缩放比例，目标 50 万像素
@@ -528,7 +632,7 @@ class LuminaImageProcessor:
             
             # 批量计算每个像素到所有 centers 的距离，找最近的
             # 使用 KDTree 加速
-            from scipy.spatial import KDTree
+
             centers_tree = KDTree(centers)
             _, labels = centers_tree.query(pixels_full)
             print(f"[IMAGE_PROCESSOR] ⏱️ KDTree query: {time.time() - t_map:.2f}s")
@@ -571,10 +675,45 @@ class LuminaImageProcessor:
         
         # Match to LUT
         t0 = time.time()
-        print(f"[IMAGE_PROCESSOR] Matching colors to LUT...")
-        _, unique_indices = self.kdtree.query(unique_colors.astype(float))
-        print(f"[IMAGE_PROCESSOR] ⏱️ LUT matching: {time.time() - t0:.2f}s")
-        
+
+        if color_space == ColorSpace.HSV:
+            print(f"[IMAGE_PROCESSOR] Converting LUT from RGB to HSV for matching...")
+            # Convert lut_rgb to HSV
+            lut_hsv = cv2.cvtColor(
+                self.lut_rgb.reshape(1, -1, 3).astype(np.uint8), cv2.COLOR_RGB2HSV
+            ).reshape(-1, 3)
+            # Normalize H channel: 0-180 → 0-255
+
+            print(f"[IMAGE_PROCESSOR] LUT converted to HSV (H normalized)")
+
+            # Convert HSV to cylindrical projection coordinates
+            # This properly handles the circular nature of the Hue channel
+            lut_cylindrical = _hsv_to_cylindrical(lut_hsv)
+            print(
+                f"[IMAGE_PROCESSOR] LUT converted to cylindrical coordinates (Hue rotation handled)"
+            )
+
+            # Build KDTree in cylindrical coordinate space
+            print(
+                f"[IMAGE_PROCESSOR] Building KDTree in cylindrical coordinate space..."
+            )
+            kdtree_hsv = KDTree(lut_cylindrical.astype(float))
+
+            # Match in cylindrical coordinate space
+            print(
+                f"[IMAGE_PROCESSOR] Matching colors in cylindrical coordinate space..."
+            )
+            # Convert unique_colors to cylindrical coordinates for matching
+            unique_cylindrical = _hsv_to_cylindrical(unique_colors)
+            _, unique_indices = kdtree_hsv.query(unique_cylindrical.astype(float))
+            print(f"[IMAGE_PROCESSOR] ⏱️ HSV LUT matching: {time.time() - t0:.2f}s")
+
+        else:
+            # Match in RGB space (original behavior)
+            print(f"[IMAGE_PROCESSOR] Matching colors to LUT in RGB space...")
+            _, unique_indices = self.kdtree.query(unique_colors.astype(float))
+            print(f"[IMAGE_PROCESSOR] ⏱️ RGB LUT matching: {time.time() - t0:.2f}s")
+
         # 🚀 优化：构建颜色编码查找表
         # 把 RGB 编码成单个整数：R*65536 + G*256 + B
         # 这样可以用 NumPy 向量化操作一次性完成映射
@@ -613,29 +752,75 @@ class LuminaImageProcessor:
         print(f"[IMAGE_PROCESSOR] ✅ Total processing time: {time.time() - total_start:.2f}s")
         
         # Prepare debug data
+        # Convert quantized_image back to RGB if we were in HSV space
+        if color_space == ColorSpace.HSV:
+            # Denormalize H channel: 0-255 → 0-180
+            quantized_for_display = quantized_image.astype(np.float32)
+            quantized_for_display[:, :, 0] = quantized_for_display[:, :, 0] * 180 / 255
+            quantized_for_display = quantized_for_display.astype(np.uint8)
+            # Convert HSV to RGB
+            quantized_rgb_display = cv2.cvtColor(
+                quantized_for_display, cv2.COLOR_HSV2RGB
+            )
+        else:
+            quantized_rgb_display = quantized_image
+
         debug_data = {
-            'quantized_image': quantized_image.copy(),
-            'num_colors': len(unique_colors),
-            'bilateral_filtered': rgb_processed.copy(),
-            'sharpened': rgb_sharpened.copy(),
-            'filter_settings': {
-                'blur_kernel': blur_kernel,
-                'smooth_sigma': smooth_sigma
-            }
+            "quantized_image": quantized_rgb_display.copy(),
+            "num_colors": len(unique_colors),
+            "bilateral_filtered": rgb_processed.copy(),
+            "sharpened": rgb_sharpened.copy(),
+            "filter_settings": {
+                "blur_kernel": blur_kernel,
+                "smooth_sigma": smooth_sigma,
+            },
         }
         
         return matched_rgb, material_matrix, quantized_image, debug_data
-    
-    def _process_pixel_mode(self, rgb_arr, target_h, target_w):
+
+    def _process_pixel_mode(self, rgb_arr, target_h, target_w, color_space):
         """
         Pixel art mode image processing
         Direct pixel-level color matching, no smoothing
         """
         print(f"[IMAGE_PROCESSOR] Direct pixel-level matching (Pixel Art mode)...")
-        
-        flat_rgb = rgb_arr.reshape(-1, 3)
-        _, indices = self.kdtree.query(flat_rgb)
-        
+        print(f"[IMAGE_PROCESSOR] Color space mode: {color_space.value.upper()}")
+
+        if color_space == ColorSpace.HSV:
+            print(f"[IMAGE_PROCESSOR] Converting RGB to HSV for matching...")
+
+            # Convert input RGB to HSV
+            hsv_arr = cv2.cvtColor(rgb_arr.astype(np.uint8), cv2.COLOR_RGB2HSV).astype(
+                np.float32
+            )
+            # Normalize H channel: 0-180 → 0-255
+            hsv_arr[:, :, 0] = hsv_arr[:, :, 0] * 255 / 180
+            hsv_arr = hsv_arr.astype(np.uint8)
+
+            # Flatten HSV array for matching
+            flat_hsv = hsv_arr.reshape(-1, 3)
+
+            # Convert LUT RGB to HSV
+            print(f"[IMAGE_PROCESSOR] Converting LUT from RGB to HSV...")
+            lut_hsv = cv2.cvtColor(
+                self.lut_rgb.reshape(1, -1, 3).astype(np.uint8), cv2.COLOR_RGB2HSV
+            ).reshape(-1, 3)
+
+            # Convert HSV to cylindrical projection coordinates
+            print(f"[IMAGE_PROCESSOR] Converting to cylindrical coordinates...")
+            lut_cylindrical = _hsv_to_cylindrical(lut_hsv)
+            pixel_cylindrical = _hsv_to_cylindrical(flat_hsv)
+
+            # Build KDTree in cylindrical coordinate space and match
+            print(f"[IMAGE_PROCESSOR] Matching in cylindrical coordinate space...")
+            kdtree_hsv = KDTree(lut_cylindrical.astype(float))
+            _, indices = kdtree_hsv.query(pixel_cylindrical.astype(float))
+            print(f"[IMAGE_PROCESSOR] HSV matching complete!")
+        else:
+            # Original RGB matching
+            flat_rgb = rgb_arr.reshape(-1, 3)
+            _, indices = self.kdtree.query(flat_rgb)
+
         matched_rgb = self.lut_rgb[indices].reshape(target_h, target_w, 3)
         material_matrix = self.ref_stacks[indices].reshape(
             target_h, target_w, PrinterConfig.COLOR_LAYERS

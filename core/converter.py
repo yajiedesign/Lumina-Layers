@@ -12,7 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 import gradio as gr
 from typing import List, Dict, Tuple, Optional
 
-from config import PrinterConfig, ColorSystem, ModelingMode, PREVIEW_SCALE, PREVIEW_MARGIN, OUTPUT_DIR
+from config import PrinterConfig, ColorSystem, ModelingMode, ColorSpace, PREVIEW_SCALE, PREVIEW_MARGIN, OUTPUT_DIR
 from utils import Stats, safe_fix_3mf_names
 
 from core.image_processing import LuminaImageProcessor
@@ -257,6 +257,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                          structure_mode, auto_bg, bg_tol, color_mode,
                          add_loop, loop_width, loop_length, loop_hole, loop_pos,
                          modeling_mode=ModelingMode.VECTOR, quantize_colors=32,
+                         color_space: ColorSpace = ColorSpace.RGB,
                          blur_kernel=0, smooth_sigma=10,
                          color_replacements=None):
     """
@@ -285,6 +286,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
         loop_pos: Loop position (x, y) tuple
         modeling_mode: Modeling mode ("vector"/"pixel")
         quantize_colors: Number of colors for K-Means quantization
+        color_space： RGB or HSV
         blur_kernel: Median filter kernel size (0=disabled, recommended 0-5, default 0)
         smooth_sigma: Bilateral filter sigma value (recommended 5-20, default 10)
         color_replacements: Optional dict of color replacements {hex: hex}
@@ -469,7 +471,8 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             auto_bg=auto_bg,
             bg_tol=bg_tol,
             blur_kernel=blur_kernel,
-            smooth_sigma=smooth_sigma
+            smooth_sigma=smooth_sigma,
+            color_space =color_space
         )
     except Exception as e:
         return None, None, None, f"❌ Image processing failed: {e}"
@@ -906,7 +909,7 @@ def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
 def generate_preview_cached(image_path, lut_path, target_width_mm,
                             auto_bg, bg_tol, color_mode,
                             modeling_mode: ModelingMode = ModelingMode.HIGH_FIDELITY,
-                            quantize_colors: int = 64):
+                            quantize_colors: int = 64,color_space:ColorSpace = ColorSpace.RGB):
     """
     Generate preview and cache data
     For 2D preview interface
@@ -920,6 +923,7 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
         color_mode: Color system mode (CMYW/RYBW)
         modeling_mode: Modeling mode (HIGH_FIDELITY/PIXEL_ART)
         quantize_colors: K-Means quantization color count (8-256)
+        color_space: RGB or HSV
 
     Returns:
         tuple: (preview_image, cache_data, status_message)
@@ -942,7 +946,7 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
         print("[CONVERTER] Warning: modeling_mode was None, using default HIGH_FIDELITY")
     else:
         modeling_mode = ModelingMode(modeling_mode)
-
+    color_space = ColorSpace(color_space)
     # Clamp quantize_colors to valid range
     quantize_colors = max(8, min(256, quantize_colors))
     
@@ -958,7 +962,8 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
             auto_bg=auto_bg,
             bg_tol=bg_tol,
             blur_kernel=0,
-            smooth_sigma=10
+            smooth_sigma=10,
+            color_space= color_space
         )
     except Exception as e:
         return None, None, f"❌ Preview generation failed: {e}"
@@ -1176,6 +1181,7 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
                         structure_mode, auto_bg, bg_tol, color_mode,
                         add_loop, loop_width, loop_length, loop_hole, loop_pos,
                         modeling_mode=ModelingMode.VECTOR, quantize_colors=64,
+                        color_space: ColorSpace = ColorSpace.RGB,
                         color_replacements=None):
     """
     Wrapper function for generating final model.
@@ -1192,7 +1198,7 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
         image_path, lut_path, target_width_mm, spacer_thick,
         structure_mode, auto_bg, bg_tol, color_mode,
         add_loop, loop_width, loop_length, loop_hole, loop_pos,
-        modeling_mode, quantize_colors,
+        modeling_mode, quantize_colors, color_space,
         blur_kernel=0,
         smooth_sigma=10,
         color_replacements=color_replacements
