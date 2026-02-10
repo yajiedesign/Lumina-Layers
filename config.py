@@ -48,6 +48,22 @@ class ModelingMode(str, Enum):
         }
         return display_names.get(self, self.value)
 
+class MatchStrategy(str, Enum):
+    """LUT 匹配策略枚举
+
+    仅在 High-Fidelity 模式下有效,控制颜色匹配算法选择。
+    """
+    RGB_EUCLIDEAN = "rgb_euclidean"  # RGB 欧几里得距离匹配
+    DELTAE2000 = "deltae2000"  # CIEDE2000 感知距离匹配
+
+    def get_display_name(self) -> str:
+        """获取策略的显示名称"""
+        display_names = {
+            MatchStrategy.RGB_EUCLIDEAN: "RGB Euclidean",
+            MatchStrategy.DELTAE2000: "CIEDE2000",
+        }
+        return display_names.get(self, self.value)
+
 
 class ColorSystem:
     """Color model definitions for CMYW, RYBW, and 6-Color systems."""

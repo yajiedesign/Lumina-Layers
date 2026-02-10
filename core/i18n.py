@@ -669,6 +669,12 @@ class I18n:
             'zh': '☀️ 日间模式',
             'en': '☀️ Day Mode'
         },
+
+        'conv_match_strategy': {'zh': '配准策略', 'en': 'Match Strategy'},
+        'conv_match_strategy_info': {'zh': '仅高精度模式 ',
+                                     'en': 'High-Fidelity mode only'},
+        'conv_match_strategy_rgb': {'zh': 'RGB 欧氏距离', 'en': 'RGB Euclidean'},
+        'conv_match_strategy_deltae2000': {'zh': 'CIEDE2000 (感知均匀)', 'en': 'CIEDE2000'},
         
         # ==================== About Page Content ====================
         'about_content': {

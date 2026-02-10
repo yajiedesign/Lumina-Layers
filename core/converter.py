@@ -12,7 +12,15 @@ from PIL import Image, ImageDraw, ImageFont
 import gradio as gr
 from typing import List, Dict, Tuple, Optional
 
-from config import PrinterConfig, ColorSystem, ModelingMode, PREVIEW_SCALE, PREVIEW_MARGIN, OUTPUT_DIR
+from config import (
+    PrinterConfig,
+    ColorSystem,
+    ModelingMode,
+    MatchStrategy,
+    PREVIEW_SCALE,
+    PREVIEW_MARGIN,
+    OUTPUT_DIR,
+)
 from utils import Stats, safe_fix_3mf_names
 
 from core.image_processing import LuminaImageProcessor
@@ -257,6 +265,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
                          structure_mode, auto_bg, bg_tol, color_mode,
                          add_loop, loop_width, loop_length, loop_hole, loop_pos,
                          modeling_mode=ModelingMode.VECTOR, quantize_colors=32,
+                         match_strategy=MatchStrategy.RGB_EUCLIDEAN,
                          blur_kernel=0, smooth_sigma=10,
                          color_replacements=None):
     """
@@ -285,6 +294,7 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
         loop_pos: Loop position (x, y) tuple
         modeling_mode: Modeling mode ("vector"/"pixel")
         quantize_colors: Number of colors for K-Means quantization
+        match_strategy : RGB or CIEDE2000
         blur_kernel: Median filter kernel size (0=disabled, recommended 0-5, default 0)
         smooth_sigma: Bilateral filter sigma value (recommended 5-20, default 10)
         color_replacements: Optional dict of color replacements {hex: hex}
@@ -469,7 +479,8 @@ def convert_image_to_3d(image_path, lut_path, target_width_mm, spacer_thick,
             auto_bg=auto_bg,
             bg_tol=bg_tol,
             blur_kernel=blur_kernel,
-            smooth_sigma=smooth_sigma
+            smooth_sigma=smooth_sigma,
+            match_strategy=match_strategy,
         )
     except Exception as e:
         return None, None, None, f"❌ Image processing failed: {e}"
@@ -906,7 +917,8 @@ def _create_preview_mesh(matched_rgb, mask_solid, total_layers):
 def generate_preview_cached(image_path, lut_path, target_width_mm,
                             auto_bg, bg_tol, color_mode,
                             modeling_mode: ModelingMode = ModelingMode.HIGH_FIDELITY,
-                            quantize_colors: int = 64):
+                            quantize_colors: int = 64,
+                            match_strategy=MatchStrategy.RGB_EUCLIDEAN):
     """
     Generate preview and cache data
     For 2D preview interface
@@ -943,6 +955,7 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
     else:
         modeling_mode = ModelingMode(modeling_mode)
 
+    match_strategy = MatchStrategy(match_strategy)
     # Clamp quantize_colors to valid range
     quantize_colors = max(8, min(256, quantize_colors))
     
@@ -958,7 +971,8 @@ def generate_preview_cached(image_path, lut_path, target_width_mm,
             auto_bg=auto_bg,
             bg_tol=bg_tol,
             blur_kernel=0,
-            smooth_sigma=10
+            smooth_sigma=10,
+            match_strategy=match_strategy,
         )
     except Exception as e:
         return None, None, f"❌ Preview generation failed: {e}"
@@ -1176,6 +1190,7 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
                         structure_mode, auto_bg, bg_tol, color_mode,
                         add_loop, loop_width, loop_length, loop_hole, loop_pos,
                         modeling_mode=ModelingMode.VECTOR, quantize_colors=64,
+                        match_strategy=MatchStrategy.RGB_EUCLIDEAN,
                         color_replacements=None):
     """
     Wrapper function for generating final model.
@@ -1193,6 +1208,7 @@ def generate_final_model(image_path, lut_path, target_width_mm, spacer_thick,
         structure_mode, auto_bg, bg_tol, color_mode,
         add_loop, loop_width, loop_length, loop_hole, loop_pos,
         modeling_mode, quantize_colors,
+        match_strategy,
         blur_kernel=0,
         smooth_sigma=10,
         color_replacements=color_replacements

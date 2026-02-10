@@ -9,7 +9,7 @@ import cv2
 from PIL import Image
 from scipy.spatial import KDTree
 
-from config import PrinterConfig, ModelingMode
+from config import PrinterConfig, ModelingMode, MatchStrategy
 
 # SVG support (optional dependency)
 try:
@@ -280,8 +280,8 @@ class LuminaImageProcessor:
         self.kdtree = KDTree(self.lut_rgb)
     
     def process_image(self, image_path, target_width_mm, modeling_mode,
-                     quantize_colors, auto_bg, bg_tol,
-                     blur_kernel=0, smooth_sigma=10):
+                     quantize_colors,match_strategy, auto_bg, bg_tol,
+                     blur_kernel=0, smooth_sigma=10, ):
         """
         Main image processing method
         
@@ -290,6 +290,7 @@ class LuminaImageProcessor:
             target_width_mm: Target width (millimeters)
             modeling_mode: Modeling mode ("high-fidelity", "pixel")
             quantize_colors: K-Means quantization color count
+            match_strategy : RGB or CIEDE2000
             auto_bg: Whether to auto-remove background
             bg_tol: Background tolerance
             blur_kernel: Median filter kernel size (0=disabled, recommended 0-5)
@@ -396,7 +397,7 @@ class LuminaImageProcessor:
         debug_data = None
         if modeling_mode == ModelingMode.HIGH_FIDELITY:
             matched_rgb, material_matrix, bg_reference, debug_data = self._process_high_fidelity_mode(
-                rgb_arr, target_h, target_w, quantize_colors, blur_kernel, smooth_sigma
+                rgb_arr, target_h, target_w, quantize_colors, match_strategy ,blur_kernel, smooth_sigma
             )
         else:
             matched_rgb, material_matrix, bg_reference = self._process_pixel_mode(
@@ -432,8 +433,8 @@ class LuminaImageProcessor:
         return result
 
     
-    def _process_high_fidelity_mode(self, rgb_arr, target_h, target_w, quantize_colors,
-                                    blur_kernel, smooth_sigma):
+    def _process_high_fidelity_mode(self, rgb_arr, target_h, target_w, quantize_colors,match_strategy,
+                                    blur_kernel, smooth_sigma,  ):
         """
         High-fidelity mode image processing
         Includes configurable filtering, K-Means quantization and color matching
@@ -572,7 +573,13 @@ class LuminaImageProcessor:
         # Match to LUT
         t0 = time.time()
         print(f"[IMAGE_PROCESSOR] Matching colors to LUT...")
-        _, unique_indices = self.kdtree.query(unique_colors.astype(float))
+        if match_strategy == MatchStrategy.RGB_EUCLIDEAN:
+            _, unique_indices = self.kdtree.query(unique_colors.astype(float))
+        elif match_strategy == MatchStrategy.DELTAE2000:
+            from core.color_matchers import match_colors_deltae2000
+            unique_indices = match_colors_deltae2000(unique_colors, self.lut_rgb)
+        else:
+            raise ValueError(f"Invalid match_strategy: {match_strategy}")
         print(f"[IMAGE_PROCESSOR] ⏱️ LUT matching: {time.time() - t0:.2f}s")
         
         # 🚀 优化：构建颜色编码查找表
